@@ -1,0 +1,16 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 运行时生成的中间文件（Yosys 网表、SBY 任务、日志）
+workspace/json/*
+workspace/tasks/
+workspace/logs/
+
+# 跑出来的报表数据
+reports/*
+!reports/README.md
+
+# SBY 的旧版本残留
+*_task/
+*_miter/
