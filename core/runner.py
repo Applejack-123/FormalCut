@@ -1,62 +1,65 @@
-import subprocess
-import concurrent.futures
-import time
 import os
-from pathlib import Path
-import csv
+import subprocess
+import glob
+import time
 
-def run_task(task_dir):
-    task_name = os.path.basename(task_dir)
-    sby_file = "task.sby"
+def run_all_tasks():
+    # 在容器内运行时，当前工作目录默认就是 /workspace/FormalCut
+    tasks_dir = 'workspace/tasks'
     
-    start_time = time.time()
-    # 运行 sby 命令，注意在 task_dir 下执行
-    result = subprocess.run(
-        ['sby', '-f', sby_file], 
-        cwd=task_dir, 
-        capture_output=True, text=True
-    )
-    elapsed = time.time() - start_time
+    # 找到所有生成的 .ys 脚本
+    ys_files = glob.glob(f"{tasks_dir}/*.ys")
     
-    status = 'UNKNOWN'
-    if 'DONE (PASS' in result.stdout: status = 'PASS'
-    elif 'DONE (FAIL' in result.stdout: status = 'FAIL'
-        
-    decision = 'PRUNED_PROVEN' if status == 'PASS' else ('KEEP_COUNTEREXAMPLE' if status == 'FAIL' else 'KEEP_UNKNOWN')
-        
-    return {
-        'Fault': task_name,
-        'Status': status,
-        'Decision': decision,
-        'Time(s)': round(elapsed, 2)
-    }
+    if not ys_files:
+        print("❌ 没有找到任何 .ys 任务，请先运行 miter_builder.py")
+        return []
 
-def run_all_tasks(max_workers=4):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(current_dir)
-    tasks_dir = os.path.join(project_root, 'workspace', 'tasks')
+    print(f"=== 发现 {len(ys_files)} 个注入任务，开始验证 ===")
     
-    # 找出所有任务文件夹
-    tasks = [str(p) for p in Path(tasks_dir).iterdir() if p.is_dir()]
-    
-    if not tasks:
-        print("❌ 没有找到任何任务，请先运行 miter_builder.py")
-        return None
-
-    print(f"=== 发现 {len(tasks)} 个任务，启动 {max_workers} 并发执行 ===")
     results = []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_task = {executor.submit(run_task, task): task for task in tasks}
-        for future in concurrent.futures.as_completed(future_to_task):
-            res = future.result()
-            results.append(res)
-            print(f"[{res['Status']}] 故障: {res['Fault']} | 耗时: {res['Time(s)']}s")
+    
+    for ys_file in ys_files:
+        base_name = os.path.basename(ys_file).replace('.ys', '')
+        smt2_file = ys_file.replace('.ys', '.smt2')
+        
+        print(f"\n[{base_name}] 正在执行 Yosys 注入...")
+        # 1. 生成 SMT2
+        res_yosys = subprocess.run(["yosys", "-s", ys_file], capture_output=True, text=True)
+        if res_yosys.returncode != 0:
+            print(f"[{base_name}] ❌ Yosys 注入失败！")
+            results.append({'task': base_name, 'status': 'ERROR'})
+            continue
             
+        print(f"[{base_name}] 正在运行 Yices 求解器...")
+        # 2. 跑 Yices 验证
+        start_time = time.time()
+        res_yices = subprocess.run(
+            ["yosys-smtbmc", "-s", "yices", "-t", "5", smt2_file], 
+            capture_output=True, text=True
+        )
+        elapsed = time.time() - start_time
+        
+        # 3. 解析结果
+        if "Status: PASSED" in res_yices.stdout:
+            status = "PASS"
+            decision = "PRUNED"
+        elif "Status: FAILED" in res_yices.stdout:
+            status = "FAIL"
+            decision = "KEEP"
+        else:
+            status = "UNKNOWN"
+            decision = "TIMEOUT_KEEP"
+            
+        print(f"[{base_name}] ✅ 结果: {status} ({decision}) | 耗时: {elapsed:.2f}s")
+        
+        results.append({
+            'task': base_name,
+            'status': status,
+            'decision': decision,
+            'time': round(elapsed, 2)
+        })
+        
     return results
 
 if __name__ == "__main__":
-    res = run_all_tasks()
-    if res:
-        # 简单打印一下
-        pass
+    run_all_tasks()

@@ -1,0 +1,25 @@
+# 1. 读入设计并压平
+read_verilog ./circuits/seq_counter/counter.v
+prep -top counter
+flatten
+
+# 2. 读入带断言的 SystemVerilog 外壳
+read_verilog -sv miter_wrapper.v
+prep -top miter_wrapper
+flatten
+
+# 3. 此时模块只有一个，我们直接选中那个寄存器！
+# 注意：这里不要用 faulty_inst 这种层级名了，因为已经 flatten 了
+# 直接选 $procdff$8，插件会默认注入到所有匹配的实例上
+select t:$procdff$8
+setattr -set fault_signals 1
+cd
+
+# 4. 执行注入
+plugin -i fault_rtlil
+fault_rtlil -cnt 1 -timing 1 -effect flip
+
+# 5. 导出
+async2sync
+dffunmap
+write_smt2 -wires ./workspace/json/counter_miter.smt2
