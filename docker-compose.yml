@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  formacut:
+    image: uarchifi
+    container_name: formacut_env
+    volumes:
+      # 使用相对路径 . 代表当前 docker-compose 文件所在的目录
+      - .:/workspace/FormalCut
+    working_dir: /workspace/FormalCut
+    stdin_open: true
+    tty: true
