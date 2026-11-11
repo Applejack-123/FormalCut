@@ -4,10 +4,7 @@ import glob
 import time
 
 def run_all_tasks():
-    # 在容器内运行时，当前工作目录默认就是 /workspace/FormalCut
     tasks_dir = 'workspace/tasks'
-    
-    # 找到所有生成的 .ys 脚本
     ys_files = glob.glob(f"{tasks_dir}/*.ys")
     
     if not ys_files:
@@ -17,21 +14,18 @@ def run_all_tasks():
     print(f"=== 发现 {len(ys_files)} 个注入任务，开始验证 ===")
     
     results = []
-    
     for ys_file in ys_files:
         base_name = os.path.basename(ys_file).replace('.ys', '')
         smt2_file = ys_file.replace('.ys', '.smt2')
         
         print(f"\n[{base_name}] 正在执行 Yosys 注入...")
-        # 1. 生成 SMT2
         res_yosys = subprocess.run(["yosys", "-s", ys_file], capture_output=True, text=True)
         if res_yosys.returncode != 0:
             print(f"[{base_name}] ❌ Yosys 注入失败！")
-            results.append({'task': base_name, 'status': 'ERROR'})
+            results.append({'task': base_name, 'status': 'ERROR', 'decision': 'ERROR', 'time': 0})
             continue
             
         print(f"[{base_name}] 正在运行 Yices 求解器...")
-        # 2. 跑 Yices 验证
         start_time = time.time()
         res_yices = subprocess.run(
             ["yosys-smtbmc", "-s", "yices", "-t", "5", smt2_file], 
@@ -39,7 +33,6 @@ def run_all_tasks():
         )
         elapsed = time.time() - start_time
         
-        # 3. 解析结果
         if "Status: PASSED" in res_yices.stdout:
             status = "PASS"
             decision = "PRUNED"
