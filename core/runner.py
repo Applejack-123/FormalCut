@@ -28,7 +28,7 @@ def run_all_tasks():
         print(f"[{base_name}] 正在运行 Yices 求解器...")
         start_time = time.time()
         res_yices = subprocess.run(
-            ["yosys-smtbmc", "-s", "yices", "-t", "5", smt2_file], 
+            ["yosys-smtbmc", "-s", "yices", "-t", "5", "--noincr", smt2_file], 
             capture_output=True, text=True
         )
         elapsed = time.time() - start_time
