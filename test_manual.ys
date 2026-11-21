@@ -1,0 +1,19 @@
+read_verilog circuits/seq_counter/counter.v
+prep -top counter
+flatten
+
+# 内存克隆
+copy counter faulty_top
+rename counter golden_top
+
+# 先建 Miter（此时电路极干净）
+miter -equiv -flatten golden_top faulty_top miter_circuit
+
+# 再在 faulty_top 里注入故障
+select faulty_top/t:$procdff$8
+setattr -set fault_signals 1
+cd
+plugin -i fault_rtlil
+fault_rtlil -cnt 1 -timing 1 -effect flip
+
+write_smt2 -wires test.smt2

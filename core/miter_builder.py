@@ -10,116 +10,132 @@ def build_miter(v_file, top_module, inputs, outputs, internal_regs, fault_effect
         shutil.rmtree(tasks_dir)
     os.makedirs(tasks_dir)
     
-    v_file_abs = os.path.abspath(os.path.join(project_root, v_file))
-    input_names = [p['name'] for p in inputs]
-    is_seq = any(name in ['clk', 'clock'] for name in input_names)
-    
-    # ==========================================
-    # 1. 自动生成带断言的 miter_wrapper.v
-    # ==========================================
-    wrapper_code = "module miter_wrapper(\n"
-    for p in inputs:
-        w = p['width']
-        wrapper_code += f"    input wire [{w-1}:0] {p['name']},\n" if w > 1 else f"    input wire {p['name']},\n"
-    for p in outputs:
-        w = p['width']
-        wrapper_code += f"    output wire [{w-1}:0] {p['name']}_golden,\n" if w > 1 else f"    output wire {p['name']}_golden,\n"
-        wrapper_code += f"    output wire [{w-1}:0] {p['name']}_faulty,\n" if w > 1 else f"    output wire {p['name']}_faulty,\n"
-    wrapper_code += ");\n\n"
-    
-    wrapper_code += f"    {top_module} inst_golden (\n"
-    for p in inputs: wrapper_code += f"        .{p['name']}({p['name']}),\n"
-    for p in outputs: wrapper_code += f"        .{p['name']}({p['name']}_golden),\n"
-    wrapper_code = wrapper_code.rstrip(',\n') + "\n    );\n\n"
-    
-    wrapper_code += f"    {top_module} inst_faulty (\n"
-    for p in inputs: wrapper_code += f"        .{p['name']}({p['name']}),\n"
-    for p in outputs: wrapper_code += f"        .{p['name']}({p['name']}_faulty),\n"
-    wrapper_code = wrapper_code.rstrip(',\n') + "\n    );\n\n"
-    
-    # 🚨 修复点 1：共同初态约束
-    if is_seq:
-        wrapper_code += "    // 强制同步：用计数器跳过初始状态差异\n"
-        wrapper_code += "    reg [1:0] init_counter = 2'b00;\n"
-        clk_name = 'clk' if 'clk' in input_names else 'clock'
-        wrapper_code += f"    always @(posedge {clk_name}) begin\n"
-        wrapper_code += "        if (init_counter < 2'b11) init_counter <= init_counter + 1'b1;\n"
-        wrapper_code += "    end\n\n"
-
-    if is_seq and use_constraints:
-        wrapper_code += "    always @(*) begin\n"
-        if 'rst' in input_names: wrapper_code += "        assume(rst == 1'b0);\n"
-        elif 'reset' in input_names: wrapper_code += "        assume(reset == 1'b0);\n"
-        if 'en' in input_names: wrapper_code += "        assume(en == 1'b1);\n"
-        elif 'enable' in input_names: wrapper_code += "        assume(enable == 1'b1);\n"
-        if 'mode' in input_names: wrapper_code += "        assume(mode == 1'b1);\n"
-        elif 'mask' in input_names: wrapper_code += "        assume(mask == 1'b1);\n"
-        if custom_assume: wrapper_code += f"        assume({custom_assume});\n"
-        wrapper_code += "    end\n\n"
-        
-    # 🚨 修复点 2：延迟 2 拍后检查
-    wrapper_code += "    always @(*) begin\n"
-    if is_seq:
-        wrapper_code += "        if (init_counter == 2'b11) begin\n"
-        indent = "            "
+    if fault_effect == 'flip':
+        mutate_mode = 'inv'
+    elif fault_effect == 'set':
+        mutate_mode = 'const1'
+    elif fault_effect == 'reset':
+        mutate_mode = 'const0'
     else:
-        indent = "        "
+        mutate_mode = 'inv'
 
-    has_mask = ('mode' in input_names) or ('mask' in input_names)
-    if use_constraints and has_mask:
-        mask_name = 'mode' if 'mode' in input_names else 'mask'
-        wrapper_code += f"{indent}if ({mask_name} == 1'b0) begin\n"
-        for p in outputs:
-            wrapper_code += f"{indent}    assert({p['name']}_golden == {p['name']}_faulty);\n"
-        wrapper_code += f"{indent}end\n"
-    else:
-        for p in outputs:
-            wrapper_code += f"{indent}assert({p['name']}_golden == {p['name']}_faulty);\n"
-        
-    if is_seq: wrapper_code += "        end\n"
-    wrapper_code += "    end\nendmodule\n"
-    
-    with open(os.path.join(tasks_dir, "miter_wrapper.v"), "w", encoding='utf-8') as f:
-        f.write(wrapper_code)
-
-    # ==========================================
-    # 2. 生成验证任务
-    # ==========================================
     tasks = []
     if not internal_regs:
         return tasks
 
     for reg in internal_regs:
         reg_name = reg['name']
-        safe_reg_name = reg_name.replace('$', '').replace('\\', '_').replace('.', '_').replace(':', '_')
-        task_name = f"task_{safe_reg_name}"
+        reg_width = reg.get('width', 1)
         
-        docker_v_file = f"/workspace/FormalCut/{v_file.replace(chr(92), '/')}"
-        docker_wrapper = f"/workspace/FormalCut/workspace/tasks/miter_wrapper.v"
-        docker_smt2 = f"/workspace/FormalCut/workspace/tasks/{task_name}.smt2"
-        
-        ys_code = f"""
-read_verilog {docker_v_file}
-prep -top {top_module}
-flatten
+        for bit_idx in range(reg_width):
+            safe_reg_name = reg_name.replace('$', '').replace('\\', '_').replace('.', '_').replace(':', '_')
+            task_name = "task_{}_bit{}".format(safe_reg_name, bit_idx)
+            
+            docker_v_file = "/workspace/FormalCut/{}".format(v_file.replace(chr(92), '/'))
+            mutated_v = os.path.join(tasks_dir, "{}_mutated.v".format(task_name))
+            docker_mutated_v = "/workspace/FormalCut/workspace/tasks/{}_mutated.v".format(task_name)
+            
+            mutate_cmd = "read_verilog {}; prep -top {}; mutate -mode {} -module {} -cell {} -port Q -portbit {} -ctrl mutsel 1 1; write_verilog -noattr {}".format(
+                docker_v_file, top_module, mutate_mode, top_module, reg_name, bit_idx, docker_mutated_v
+            )
+            
+            miter_v = os.path.join(tasks_dir, "{}_miter.v".format(task_name))
+            docker_miter_v = "/workspace/FormalCut/workspace/tasks/{}_miter.v".format(task_name)
+            
+            ports_decl = ""
+            ref_ports = ""
+            uut_ports = ""
+            for p in inputs:
+                w = p['width']
+                ports_decl += "    input wire [{}:0] {},\n".format(w-1, p['name']) if w > 1 else "    input wire {},\n".format(p['name'])
+                ref_ports += "        .{}({}),\n".format(p['name'], p['name'])
+                uut_ports += "        .{}({}),\n".format(p['name'], p['name'])
+            
+            out_decl = ""
+            assert_logic = ""
+            for p in outputs:
+                w = p['width']
+                out_decl += "    wire [{}:0] {}_ref, {}_uut;\n".format(w-1, p['name'], p['name']) if w > 1 else "    wire {}_ref, {}_uut;\n".format(p['name'], p['name'])
+                ref_ports += "        .{}({}_ref),\n".format(p['name'], p['name'])
+                uut_ports += "        .{}({}_uut),\n".format(p['name'], p['name'])
+                assert_logic += "            assert({}_ref == {}_uut);\n".format(p['name'], p['name'])
+            
+            is_seq = any(p['name'] in ['clk', 'clock'] for p in inputs)
+            clk_name = 'clk' if 'clk' in [p['name'] for p in inputs] else 'clock'
+            
+            init_cond = ""
+            if is_seq and use_constraints:
+                init_cond = """
+    reg [1:0] init_counter = 2'b00;
+    always @(posedge {}) begin
+        if (init_counter < 2'b11) init_counter <= init_counter + 1'b1;
+    end
+""".format(clk_name)
+            
+            env_constraints = ""
+            if is_seq and use_constraints:
+                if 'rst' in [p['name'] for p in inputs]:
+                    env_constraints += "        assume(rst == 1'b0);\n"
+                if 'en' in [p['name'] for p in inputs]:
+                    env_constraints += "        assume(en == 1'b1);\n"
+                if custom_assume:
+                    env_constraints += "        assume({});\n".format(custom_assume)
 
-select {top_module}/t:{reg_name}
-setattr -set fault_signals 1
-cd;
+            wrapper_code = """
+module miter_test(
+{ports_decl}
+);
+{out_decl}
+    {top_module} ref (
+{ref_ports}
+    );
 
-read_verilog -sv {docker_wrapper}
-prep -top miter_wrapper
+    {top_module} uut (
+{uut_ports}
+    );
+{init_cond}
+    always @(*) begin
+{env_constraints}
+        if (init_counter == 2'b11) begin
+{assert_logic}
+        end
+    end
+endmodule
+""".format(
+                ports_decl=ports_decl,
+                out_decl=out_decl,
+                top_module=top_module,
+                ref_ports=ref_ports.rstrip(',\n'),
+                uut_ports=uut_ports.rstrip(',\n'),
+                init_cond=init_cond,
+                env_constraints=env_constraints,
+                assert_logic=assert_logic
+            )
+            with open(miter_v, "w", encoding='utf-8') as f:
+                f.write(wrapper_code)
+
+            sby_file = os.path.join(tasks_dir, "{}.sby".format(task_name))
+            sby_code = """
+[options]
+mode bmc
+depth 5
+[engines]
+smtbmc yices
+[script]
+read_verilog {docker_mutated_v}
+read_verilog -sv {docker_miter_v}
+prep -top miter_test
 flatten
-plugin -i fault_rtlil
-fault_rtlil -cnt 1 -timing 1 -effect {fault_effect}
 async2sync
 dffunmap
-write_smt2 -wires {docker_smt2}
-"""
-        with open(os.path.join(tasks_dir, f"{task_name}.ys"), "w", encoding='utf-8') as f:
-            f.write(ys_code)
-            
-        tasks.append(task_name)
+[files]
+{docker_mutated_v}
+{docker_miter_v}
+""".format(docker_mutated_v=docker_mutated_v, docker_miter_v=docker_miter_v)
+            with open(sby_file, 'w', encoding='utf-8') as f:
+                f.write(sby_code)
+                
+            tasks.append({'task': task_name, 'sby': sby_file, 'mutate_cmd': mutate_cmd})
         
-    print(f"Success: Generated {len(tasks)} tasks in workspace/tasks/")
+    print("Success: Generated {} mutation tasks in workspace/tasks/".format(len(tasks)))
     return tasks

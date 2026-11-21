@@ -12,16 +12,17 @@ def run_pipeline(circuit_path, top_module, fault_effect='flip', use_constraints=
     print(f"\n{'='*40}")
     print(f"🚀 启动 FormaCut 自动化故障缩减流程")
     print(f"电路: {circuit_path} | 顶层: {top_module} | 故障类型: {fault_effect}")
-    print(f"开启智能约束: {use_constraints} | 自定义约束: {custom_assume if custom_assume else '无'}")
     print(f"{'='*40}\n")
     
     inputs, outputs, internal_regs = extract_ports(circuit_path, top_module)
     if not inputs:
         return
         
-    build_miter(circuit_path, top_module, inputs, outputs, internal_regs, fault_effect, use_constraints, custom_assume)
-    results = run_all_tasks()
-    if results:
+    # 注意这里 build_miter 返回的是字典列表
+    tasks = build_miter(circuit_path, top_module, inputs, outputs, internal_regs, fault_effect, use_constraints, custom_assume)
+    
+    if tasks:
+        results = run_all_tasks(tasks)
         save_reports(results, top_module)
 
 if __name__ == "__main__":

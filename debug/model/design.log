@@ -1,0 +1,282 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.61+21 (git sha1 967b47d98, clang++ 18.1.8 -fPIC -O3)
+
+-- Executing script file `../model/design.ys' --
+
+1. Executing Verilog-2005 frontend: counter_mutated.v
+Parsing Verilog input from `counter_mutated.v' to AST representation.
+Generating RTLIL representation for module `\counter'.
+Successfully finished Verilog frontend.
+
+2. Executing Verilog-2005 frontend: miter_test.v
+Parsing SystemVerilog input from `miter_test.v' to AST representation.
+Generating RTLIL representation for module `\miter_test'.
+Successfully finished Verilog frontend.
+
+3. Executing PREP pass.
+
+3.1. Executing HIERARCHY pass (managing design hierarchy).
+
+3.1.1. Analyzing design hierarchy..
+Top module:  \miter_test
+Used module:     \counter
+
+3.1.2. Analyzing design hierarchy..
+Top module:  \miter_test
+Used module:     \counter
+Removed 0 unused modules.
+Module miter_test directly or indirectly contains formal properties -> setting "keep" attribute.
+
+3.2. Executing PROC pass (convert processes to netlists).
+
+3.2.1. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Cleaned up 0 empty switches.
+
+3.2.2. Executing PROC_RMDEAD pass (remove dead branches from decision trees).
+Removed a total of 0 dead cases.
+
+3.2.3. Executing PROC_PRUNE pass (remove redundant assignments in processes).
+Removed 0 redundant assignments.
+Promoted 2 assignments to connections.
+
+3.2.4. Executing PROC_INIT pass (extract init attributes).
+Found init rule in `\miter_test.$proc$miter_test.v:10$14'.
+  Set init value: \init_counter = 2'00
+
+3.2.5. Executing PROC_ARST pass (detect async resets in processes).
+
+3.2.6. Executing PROC_ROM pass (convert switches to ROMs).
+Converted 0 switches.
+<suppressed ~2 debug messages>
+
+3.2.7. Executing PROC_MUX pass (convert decision trees to multiplexers).
+Creating decoders for process `\miter_test.$proc$miter_test.v:10$14'.
+Creating decoders for process `\miter_test.$proc$miter_test.v:16$10'.
+     1/1: $assert$miter_test.v:18$12_EN
+Creating decoders for process `\miter_test.$proc$miter_test.v:11$7'.
+     1/1: $0\init_counter[1:0]
+Creating decoders for process `\counter.$proc$counter_mutated.v:24$4'.
+
+3.2.8. Executing PROC_DLATCH pass (convert process syncs to latches).
+
+3.2.9. Executing PROC_DFF pass (convert process syncs to FFs).
+Creating register for signal `\miter_test.\init_counter' using process `\miter_test.$proc$miter_test.v:11$7'.
+  created $dff cell `$procdff$19' with positive edge clock.
+Creating register for signal `\counter.\_09_' using process `\counter.$proc$counter_mutated.v:24$4'.
+  created $dff cell `$procdff$20' with positive edge clock.
+
+3.2.10. Executing PROC_MEMWR pass (convert process memory writes to cells).
+
+3.2.11. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Removing empty process `miter_test.$proc$miter_test.v:10$14'.
+Found and cleaned up 1 empty switch in `\miter_test.$proc$miter_test.v:16$10'.
+Removing empty process `miter_test.$proc$miter_test.v:16$10'.
+Found and cleaned up 1 empty switch in `\miter_test.$proc$miter_test.v:11$7'.
+Removing empty process `miter_test.$proc$miter_test.v:11$7'.
+Removing empty process `counter.$proc$counter_mutated.v:24$4'.
+Cleaned up 2 empty switches.
+
+3.2.12. Executing OPT_EXPR pass (perform const folding).
+Optimizing module miter_test.
+Optimizing module counter.
+<suppressed ~1 debug messages>
+
+3.3. Executing FUTURE pass.
+
+3.4. Executing OPT_EXPR pass (perform const folding).
+Optimizing module miter_test.
+Optimizing module counter.
+
+3.5. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \miter_test..
+Finding unused cells or wires in module \counter..
+Removed 0 unused cells and 13 unused wires.
+<suppressed ~2 debug messages>
+
+3.6. Executing CHECK pass (checking for obvious problems).
+Checking module counter...
+Checking module miter_test...
+Found and reported 0 problems.
+
+3.7. Executing OPT pass (performing simple optimizations).
+
+3.7.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module counter.
+Optimizing module miter_test.
+
+3.7.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\counter'.
+Computing hashes of 5 cells of `\counter'.
+Finding duplicate cells in `\counter'.
+Finding identical cells in module `\miter_test'.
+Computing hashes of 10 cells of `\miter_test'.
+Finding duplicate cells in `\miter_test'.
+Removed a total of 0 cells.
+
+3.7.3. Executing OPT_MUXTREE pass (detect dead branches in mux trees).
+Running muxtree optimizer on module \counter..
+  Creating internal representation of mux trees.
+  Evaluating internal representation of mux trees.
+  Analyzing evaluation results.
+Running muxtree optimizer on module \miter_test..
+  Creating internal representation of mux trees.
+  Evaluating internal representation of mux trees.
+  Analyzing evaluation results.
+Removed 0 multiplexer ports.
+<suppressed ~9 debug messages>
+
+3.7.4. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).
+  Optimizing cells in module \counter.
+  Optimizing cells in module \miter_test.
+Performed a total of 0 changes.
+
+3.7.5. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\counter'.
+Computing hashes of 5 cells of `\counter'.
+Finding duplicate cells in `\counter'.
+Finding identical cells in module `\miter_test'.
+Computing hashes of 10 cells of `\miter_test'.
+Finding duplicate cells in `\miter_test'.
+Removed a total of 0 cells.
+
+3.7.6. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \counter..
+Finding unused cells or wires in module \miter_test..
+
+3.7.7. Executing OPT_EXPR pass (perform const folding).
+Optimizing module counter.
+Optimizing module miter_test.
+
+3.7.8. Finished fast OPT passes. (There is nothing left to do.)
+
+3.8. Executing WREDUCE pass (reducing word size of cells).
+
+3.9. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \counter..
+Finding unused cells or wires in module \miter_test..
+
+3.10. Executing MEMORY_COLLECT pass (generating $mem cells).
+
+3.11. Executing OPT pass (performing simple optimizations).
+
+3.11.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module counter.
+Optimizing module miter_test.
+
+3.11.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\counter'.
+Computing hashes of 5 cells of `\counter'.
+Finding duplicate cells in `\counter'.
+Finding identical cells in module `\miter_test'.
+Computing hashes of 10 cells of `\miter_test'.
+Finding duplicate cells in `\miter_test'.
+Removed a total of 0 cells.
+
+3.11.3. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \counter..
+Finding unused cells or wires in module \miter_test..
+
+3.11.4. Finished fast OPT passes.
+
+3.12. Printing statistics.
+
+=== counter ===
+
+        +----------Local Count, excluding submodules.
+        | 
+       10 wires
+       25 wire bits
+       10 public wires
+       25 public wire bits
+        5 ports
+        8 port bits
+        5 cells
+        1   $add
+        1   $dff
+        3   $mux
+
+=== miter_test ===
+
+        +----------Local Count, excluding submodules.
+        | 
+       12 wires
+       21 wire bits
+        6 public wires
+       13 public wire bits
+        3 ports
+        3 port bits
+        8 cells
+        1   $add
+        1   $check
+        1   $dff
+        2   $eq
+        1   $lt
+        2   $mux
+        2 submodules
+        2   counter
+
+=== design hierarchy ===
+
+        +----------Count including submodules.
+        | 
+       18 miter_test
+        5 counter
+
+        +----------Count including submodules.
+        | 
+       32 wires
+       71 wire bits
+       26 public wires
+       63 public wire bits
+       13 ports
+       19 port bits
+        - memories
+        - memory bits
+        - processes
+       18 cells
+        3   $add
+        1   $check
+        3   $dff
+        2   $eq
+        1   $lt
+        8   $mux
+        2 submodules
+        2   counter
+
+3.13. Executing CHECK pass (checking for obvious problems).
+Checking module counter...
+Checking module miter_test...
+Found and reported 0 problems.
+
+4. Executing FLATTEN pass (flatten design).
+Deleting now unused module counter.
+<suppressed ~2 debug messages>
+
+5. Executing ASYNC2SYNC pass.
+
+6. Executing DFFUNMAP pass (unmap clock enable and synchronous reset from FFs).
+
+7. Executing HIERARCHY pass (managing design hierarchy).
+Attribute `top' found on module `miter_test'. Setting top module to miter_test.
+
+7.1. Analyzing design hierarchy..
+Top module:  \miter_test
+
+7.2. Analyzing design hierarchy..
+Top module:  \miter_test
+Removed 0 unused modules.
+Module miter_test directly or indirectly contains formal properties -> setting "keep" attribute.
+
+8. Executing jny backend.
+
+9. Executing RTLIL backend.
+Output filename: ../model/design.il
+
+End of script. Logfile hash: 4492c8808d, CPU: user 0.02s system 0.01s, MEM: 14.29 MB peak
+Yosys 0.61+21 (git sha1 967b47d98, clang++ 18.1.8 -fPIC -O3)
+Time spent: 23% 5x opt_expr (0 sec), 21% 4x read_verilog (0 sec), ...
