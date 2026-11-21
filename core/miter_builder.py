@@ -1,141 +1,450 @@
+"""Build one Yosys-native miter task per internal register bit.
+
+The miter is constructed entirely with Yosys built-ins:
+
+* ``mutate`` injects a single-bit fault into the faulty copy (``-portbit``);
+* ``mutate -mode none -ctrl`` (or ``add -input``) gives the golden copy the
+  same control port so both copies have identical interfaces;
+* ``design -stash`` / ``design -copy-from`` keep both RTLIL copies in one
+  Yosys session;
+* ``miter -equiv -make_assert`` creates the standard double-copy comparator
+  *and* the equality assertion (the ``$assert`` cell is created by Yosys, not
+  by Python);
+* ``setundef -init -zero`` gives both copies the same deterministic power-on
+  state.
+
+The fault is controlled by a ``formacut_fault_en`` input.  The wrapper drives
+that input low during the initialisation/reset window and high afterwards, so
+both copies are guaranteed to be equivalent before the fault is injected.  The
+assertion can therefore only fail after injection, never because the two
+copies started from different states.
+
+Two timing models are supported:
+
+* ``permanent``: the control signal goes high at the injection cycle and stays
+  high.  This models a persistent bit-flip / stuck-at / inverted stuck-at.
+* ``transient``: the control signal is a one-cycle pulse at the injection
+  cycle.  This models a single-event transient on the register Q output.  If
+  the register's next-state logic reads Q, the corrupted value can be latched
+  and persist; otherwise the visible effect is limited to the injection cycle.
+"""
+
 import os
+import re
 import shutil
 
-def build_miter(v_file, top_module, inputs, outputs, internal_regs, fault_effect='flip', use_constraints=True, custom_assume=None):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(current_dir)
-    tasks_dir = os.path.join(project_root, 'workspace', 'tasks')
-    
+try:  # Support both "python core/main.py" and "import core.miter_builder".
+    from .extractor import normalize_files
+except ImportError:  # pragma: no cover - script execution path
+    from extractor import normalize_files
+
+
+FAULT_MODES = {
+    "flip": "inv",
+    "inv": "inv",
+    "seu": "inv",
+    "set": "const1",
+    "sa1": "const1",
+    "const1": "const1",
+    "reset": "const0",
+    "sa0": "const0",
+    "const0": "const0",
+}
+
+FAULT_LABELS = {
+    "inv": "SEU / bit-flip (inv)",
+    "const1": "stuck-at-1 (const1)",
+    "const0": "stuck-at-0 (const0)",
+}
+
+FAULT_TIMINGS = {"permanent", "transient"}
+
+FAULT_TIMING_LABELS = {
+    "permanent": "永久翻转（从注错拍起持续有效）",
+    "transient": "瞬时翻转（只在注错拍有效 1 拍）",
+}
+
+# Number of cycles during which the fault is held inactive.  The faulty and
+# golden copies use the same inputs and the same deterministic initial state,
+# so they are equivalent during this window.
+INIT_CYCLES = 3
+
+
+def _project_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _rel_posix(path, project_root):
+    rel = os.path.relpath(path, project_root)
+    return rel.replace("\\", "/")
+
+
+def _find_port(inputs, names):
+    for port in inputs:
+        if port["name"].lower() in names:
+            return port
+    return None
+
+
+def _choose_ctrl_name(inputs):
+    """Pick a control-port name that cannot collide with a design port."""
+    reserved = {p["name"] for p in inputs}
+    reserved.update({"clk", "rst", "en", "miter_trigger", "init_counter"})
+    name = "formacut_fault_en"
+    while name in reserved:
+        name += "_"
+    return name
+
+
+def _safe_task_name(reg_name, bit_index, used_names):
+    base = re.sub(r"[^0-9A-Za-z_]+", "_", reg_name).strip("_") or "reg"
+    base = "task_{}_bit{}".format(base, bit_index)
+    name = base
+    suffix = 2
+    while name in used_names:
+        name = "{}_{}".format(base, suffix)
+        suffix += 1
+    used_names.add(name)
+    return name
+
+
+def _wrapper_port_decl(port):
+    if port["width"] > 1:
+        return "    input wire [{}:0] {}".format(port["width"] - 1, port["name"])
+    return "    input wire {}".format(port["name"])
+
+
+def _mentions(custom_assume, port):
+    if not custom_assume or port is None:
+        return False
+    return re.search(r"\b{}\b".format(re.escape(port["name"])),
+                     custom_assume, re.IGNORECASE) is not None
+
+
+def _custom_expressions(custom_assume):
+    """Split a user constraint into bare assumption expressions.
+
+    Accepts both ``"mode == 1'b1"`` and the old ``"assume(mode == 1'b1);"``
+    form, and allows several statements separated by semicolons.
+    """
+    if not custom_assume:
+        return []
+    expressions = []
+    for part in custom_assume.split(";"):
+        expr = part.strip()
+        if not expr:
+            continue
+        lowered = expr.lower()
+        if lowered.startswith("assume(") and expr.endswith(")"):
+            expr = expr[len("assume("):-1].strip()
+        if expr:
+            expressions.append(expr)
+    return expressions
+
+
+def _build_wrapper(inputs, use_constraints, custom_assume, ctrl_name,
+                   fault_timing="permanent"):
+    """Create the harness around ``miter_circuit``.
+
+    ``miter -equiv`` renames every input to ``in_<name>``.  The wrapper keeps
+    the original port names so user supplied assumptions such as
+    ``"mode == 1'b1"`` can be pasted in unchanged.
+
+    The equality assertion is generated by Yosys (``miter -make_assert``), so
+    this wrapper only provides:
+
+    * the common initialisation/reset window;
+    * the delayed fault-enable signal (permanent or one-cycle transient);
+    * optional input assumptions.
+    """
+    clk = _find_port(inputs, {"clk", "clock", "clk_i", "clock_i"})
+    rst = _find_port(inputs, {"rst", "reset"})
+    en = _find_port(inputs, {"en", "enable"})
+    is_seq = clk is not None
+
+    custom = (custom_assume or "").strip()
+    custom_exprs = _custom_expressions(custom)
+    auto_rst = (use_constraints and rst is not None
+                and not _mentions(custom, rst) and is_seq)
+    auto_en = (use_constraints and en is not None
+               and not _mentions(custom, en))
+    counter_max = "2'b{:02b}".format(INIT_CYCLES)
+    pulse_max = "2'b{:02b}".format(max(0, INIT_CYCLES - 1))
+    transient = fault_timing == "transient"
+
+    lines = [
+        "// Auto-generated by FormaCut.",
+        "// miter -equiv prefixes every design input with 'in_'.",
+        "// The equality assertion is created by:",
+        "//   miter -equiv -flatten -make_assert ... miter_circuit",
+        "module miter_wrapper(",
+    ]
+    port_lines = [_wrapper_port_decl(p) for p in inputs]
+    if port_lines:
+        lines.append(",\n".join(port_lines) + ",")
+    lines.append("    output wire miter_trigger")
+    lines.append(");")
+
+    if is_seq:
+        lines.extend([
+            "    // Initialisation window: the fault stays inactive for {} cycles.".format(
+                INIT_CYCLES),
+            "    // Both copies see the same inputs and the same init values,",
+            "    // so the miter assertion holds during this window.",
+            "    reg [1:0] init_counter = 2'b00;",
+        ])
+        if transient:
+            lines.extend([
+                "    // Transient fault: enable the mutation for exactly one cycle.",
+                "    reg fault_pulse = 1'b0;",
+                "    always @(posedge {}) begin".format(clk["name"]),
+                "        if (init_counter < {}) begin".format(counter_max),
+                "            init_counter <= init_counter + 1'b1;",
+                "        end",
+                "        fault_pulse <= (init_counter == {});".format(
+                    pulse_max),
+                "    end",
+                "    wire {} = fault_pulse;".format(ctrl_name),
+            ])
+        else:
+            lines.extend([
+                "    // Permanent fault: enable the mutation from the injection",
+                "    // cycle onward.",
+                "    always @(posedge {}) begin".format(clk["name"]),
+                "        if (init_counter < {}) begin".format(counter_max),
+                "            init_counter <= init_counter + 1'b1;",
+                "        end",
+                "    end",
+                "    wire {} = (init_counter == {});".format(
+                    ctrl_name, counter_max),
+            ])
+    else:
+        lines.extend([
+            "    // Combinational design: no state to initialise, activate at time 0.",
+            "    wire {} = 1'b1;".format(ctrl_name),
+        ])
+    lines.append("")
+
+    lines.append("    miter_circuit inst_miter (")
+    for port in inputs:
+        lines.append("        .in_{}({}),".format(port["name"], port["name"]))
+    lines.append("        .in_{}({}),".format(ctrl_name, ctrl_name))
+    lines.append("        .trigger(miter_trigger)")
+    lines.append("    );")
+    lines.append("")
+
+    has_assumptions = auto_rst or auto_en or bool(custom_exprs)
+    if has_assumptions:
+        lines.append("    always @(*) begin")
+        if auto_rst:
+            lines.extend([
+                "        if (init_counter < {}) begin".format(counter_max),
+                "            assume({} == 1'b1);".format(rst["name"]),
+                "        end else begin",
+                "            assume({} == 1'b0);".format(rst["name"]),
+                "        end",
+            ])
+        if auto_en:
+            lines.append("        assume({} == 1'b1);".format(en["name"]))
+        for expr in custom_exprs:
+            lines.append("        assume({});".format(expr))
+        lines.append("    end")
+    lines.append("endmodule")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_ys(files, top_module, cell_name, bit_index, mutate_mode,
+              ctrl_name, fault_timing="permanent"):
+    basenames = [os.path.basename(f) for f in files]
+    read_lines = ["read_verilog {}".format(name) for name in basenames]
+
+    lines = [
+        "# ------------------------------------------------------------",
+        "# FormaCut mutation task (Yosys built-in mutate + miter -equiv)",
+        "#   top    : {}".format(top_module),
+        "#   cell   : {} [{}]".format(cell_name, bit_index),
+        "#   mode   : {}".format(mutate_mode),
+        "#   timing : {}".format(fault_timing),
+        "#   ctrl   : {}".format(ctrl_name),
+        "# ------------------------------------------------------------",
+        "",
+        "# 1. Faulty copy.  This is the first 'prep' in this Yosys",
+        "#    process, so its generated cell names match extractor.py.",
+    ]
+    lines.extend(read_lines)
+    lines.extend([
+        "prep -top {}".format(top_module),
+        "flatten",
+        "mutate -mode {} -module {} -cell {} -port Q -portbit {} -ctrl {} 1 1".format(
+            mutate_mode, top_module, cell_name, bit_index, ctrl_name),
+        "# Make the power-on state deterministic before the two copies meet.",
+        "setundef -init -zero",
+        "rename {} faulty_top".format(top_module),
+        "design -stash faulty",
+        "",
+        "# 2. Golden copy.  The extra control input is unused here, but it",
+        "#    gives both copies the same interface for miter -equiv.",
+    ])
+    lines.extend(read_lines)
+    lines.extend([
+        "prep -top {}".format(top_module),
+        "flatten",
+        "add -input {} 1 {}".format(ctrl_name, top_module),
+        "setundef -init -zero",
+        "rename {} golden_top".format(top_module),
+        "design -stash golden",
+        "",
+        "# 3. Standard Yosys double-copy miter + generated equality assert.",
+        "design -reset",
+        "design -copy-from golden golden_top",
+        "design -copy-from faulty faulty_top",
+        "miter -equiv -flatten -make_assert golden_top faulty_top miter_circuit",
+        "",
+        "# 4. Harness: init window, delayed fault-enable, input assumptions.",
+        "read_verilog -sv miter_wrapper.v",
+        "prep -top miter_wrapper",
+        "flatten",
+        "async2sync",
+        "dffunmap",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def _build_sby(ys_basename, file_paths, project_root, depth):
+    files = []
+    for path in file_paths:
+        rel = _rel_posix(path, project_root)
+        if rel not in files:
+            files.append(rel)
+
+    lines = [
+        "[options]",
+        "mode bmc",
+        "depth {}".format(depth),
+        "",
+        "[engines]",
+        "smtbmc yices",
+        "",
+        "[script]",
+        "script {}".format(ys_basename),
+        "",
+        "[files]",
+    ]
+    lines.extend(files)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_miter(v_files, top_module, inputs, outputs, internal_regs,
+                fault_effect="flip", use_constraints=True, custom_assume=None,
+                depth=5, fault_timing="permanent"):
+    project_root = _project_root()
+    files = normalize_files(v_files)
+    tasks_dir = os.path.join(project_root, "workspace", "tasks")
+
+    basenames = [os.path.basename(f) for f in files]
+    if len(set(basenames)) != len(basenames):
+        raise ValueError(
+            "多个源文件使用了相同的文件名，SBY 复制到 src/ 时会冲突: {}".format(
+                basenames))
+
+    fault_key = str(fault_effect).lower()
+    if fault_key not in FAULT_MODES:
+        raise ValueError(
+            "未知故障类型 '{}'，支持: flip/SEU, set/SA1, reset/SA0".format(
+                fault_effect))
+    mutate_mode = FAULT_MODES[fault_key]
+
+    timing_key = str(fault_timing).lower()
+    if timing_key not in FAULT_TIMINGS:
+        raise ValueError(
+            "未知故障时间语义 '{}'，支持: permanent, transient".format(
+                fault_timing))
+
+    if not outputs:
+        print("⚠️  顶层没有输出端口，所有故障都会被判定为不可观察（PASS）。")
+
     if os.path.exists(tasks_dir):
         shutil.rmtree(tasks_dir)
     os.makedirs(tasks_dir)
-    
-    if fault_effect == 'flip':
-        mutate_mode = 'inv'
-    elif fault_effect == 'set':
-        mutate_mode = 'const1'
-    elif fault_effect == 'reset':
-        mutate_mode = 'const0'
-    else:
-        mutate_mode = 'inv'
 
     tasks = []
     if not internal_regs:
+        print("⚠️  没有发现内部寄存器，无法生成故障注入任务。")
         return tasks
 
+    clk = _find_port(inputs, {"clk", "clock", "clk_i", "clock_i"})
+    is_seq = clk is not None
+    ctrl_name = _choose_ctrl_name(inputs)
+    inject_cycle = INIT_CYCLES if is_seq else 0
+    # ``depth`` is the number of cycles *after* fault injection.  The total
+    # SBY depth includes the shared initialisation window.
+    sby_depth = depth + inject_cycle
+
+    wrapper_path = os.path.join(tasks_dir, "miter_wrapper.v")
+    wrapper_code = _build_wrapper(
+        inputs, use_constraints, custom_assume, ctrl_name, timing_key)
+    with open(wrapper_path, "w", encoding="utf-8") as f:
+        f.write(wrapper_code)
+
+    used_names = set()
     for reg in internal_regs:
-        reg_name = reg['name']
-        reg_width = reg.get('width', 1)
-        
-        for bit_idx in range(reg_width):
-            safe_reg_name = reg_name.replace('$', '').replace('\\', '_').replace('.', '_').replace(':', '_')
-            task_name = "task_{}_bit{}".format(safe_reg_name, bit_idx)
-            
-            docker_v_file = "/workspace/FormalCut/{}".format(v_file.replace(chr(92), '/'))
-            mutated_v = os.path.join(tasks_dir, "{}_mutated.v".format(task_name))
-            docker_mutated_v = "/workspace/FormalCut/workspace/tasks/{}_mutated.v".format(task_name)
-            
-            mutate_cmd = "read_verilog {}; prep -top {}; mutate -mode {} -module {} -cell {} -port Q -portbit {} -ctrl mutsel 1 1; write_verilog -noattr {}".format(
-                docker_v_file, top_module, mutate_mode, top_module, reg_name, bit_idx, docker_mutated_v
+        reg_name = reg["name"]
+        reg_width = reg.get("width", 1)
+
+        for bit_index in range(reg_width):
+            task_name = _safe_task_name(reg_name, bit_index, used_names)
+            ys_path = os.path.join(tasks_dir, "{}.ys".format(task_name))
+            sby_path = os.path.join(tasks_dir, "{}.sby".format(task_name))
+
+            ys_code = _build_ys(
+                files, top_module, reg_name, bit_index,
+                mutate_mode, ctrl_name, timing_key)
+            with open(ys_path, "w", encoding="utf-8") as f:
+                f.write(ys_code)
+
+            sby_code = _build_sby(
+                os.path.basename(ys_path),
+                files + [wrapper_path, ys_path],
+                project_root,
+                sby_depth,
             )
-            
-            miter_v = os.path.join(tasks_dir, "{}_miter.v".format(task_name))
-            docker_miter_v = "/workspace/FormalCut/workspace/tasks/{}_miter.v".format(task_name)
-            
-            ports_decl = ""
-            ref_ports = ""
-            uut_ports = ""
-            for p in inputs:
-                w = p['width']
-                ports_decl += "    input wire [{}:0] {},\n".format(w-1, p['name']) if w > 1 else "    input wire {},\n".format(p['name'])
-                ref_ports += "        .{}({}),\n".format(p['name'], p['name'])
-                uut_ports += "        .{}({}),\n".format(p['name'], p['name'])
-            
-            out_decl = ""
-            assert_logic = ""
-            for p in outputs:
-                w = p['width']
-                out_decl += "    wire [{}:0] {}_ref, {}_uut;\n".format(w-1, p['name'], p['name']) if w > 1 else "    wire {}_ref, {}_uut;\n".format(p['name'], p['name'])
-                ref_ports += "        .{}({}_ref),\n".format(p['name'], p['name'])
-                uut_ports += "        .{}({}_uut),\n".format(p['name'], p['name'])
-                assert_logic += "            assert({}_ref == {}_uut);\n".format(p['name'], p['name'])
-            
-            is_seq = any(p['name'] in ['clk', 'clock'] for p in inputs)
-            clk_name = 'clk' if 'clk' in [p['name'] for p in inputs] else 'clock'
-            
-            init_cond = ""
-            if is_seq and use_constraints:
-                init_cond = """
-    reg [1:0] init_counter = 2'b00;
-    always @(posedge {}) begin
-        if (init_counter < 2'b11) init_counter <= init_counter + 1'b1;
-    end
-""".format(clk_name)
-            
-            env_constraints = ""
-            if is_seq and use_constraints:
-                if 'rst' in [p['name'] for p in inputs]:
-                    env_constraints += "        assume(rst == 1'b0);\n"
-                if 'en' in [p['name'] for p in inputs]:
-                    env_constraints += "        assume(en == 1'b1);\n"
-                if custom_assume:
-                    env_constraints += "        assume({});\n".format(custom_assume)
-
-            wrapper_code = """
-module miter_test(
-{ports_decl}
-);
-{out_decl}
-    {top_module} ref (
-{ref_ports}
-    );
-
-    {top_module} uut (
-{uut_ports}
-    );
-{init_cond}
-    always @(*) begin
-{env_constraints}
-        if (init_counter == 2'b11) begin
-{assert_logic}
-        end
-    end
-endmodule
-""".format(
-                ports_decl=ports_decl,
-                out_decl=out_decl,
-                top_module=top_module,
-                ref_ports=ref_ports.rstrip(',\n'),
-                uut_ports=uut_ports.rstrip(',\n'),
-                init_cond=init_cond,
-                env_constraints=env_constraints,
-                assert_logic=assert_logic
-            )
-            with open(miter_v, "w", encoding='utf-8') as f:
-                f.write(wrapper_code)
-
-            sby_file = os.path.join(tasks_dir, "{}.sby".format(task_name))
-            sby_code = """
-[options]
-mode bmc
-depth 5
-[engines]
-smtbmc yices
-[script]
-read_verilog {docker_mutated_v}
-read_verilog -sv {docker_miter_v}
-prep -top miter_test
-flatten
-async2sync
-dffunmap
-[files]
-{docker_mutated_v}
-{docker_miter_v}
-""".format(docker_mutated_v=docker_mutated_v, docker_miter_v=docker_miter_v)
-            with open(sby_file, 'w', encoding='utf-8') as f:
+            with open(sby_path, "w", encoding="utf-8") as f:
                 f.write(sby_code)
-                
-            tasks.append({'task': task_name, 'sby': sby_file, 'mutate_cmd': mutate_cmd})
-        
-    print("Success: Generated {} mutation tasks in workspace/tasks/".format(len(tasks)))
+
+            tasks.append({
+                "task": task_name,
+                "sby": sby_path,
+                "ys": ys_path,
+                "cell": reg_name,
+                "bit": bit_index,
+                "fault": mutate_mode,
+                "fault_timing": timing_key,
+                "depth": sby_depth,
+                "inject_cycle": inject_cycle,
+            })
+
+    print("✅ 已用 Yosys 内置 mutate + miter -equiv -make_assert 生成 {} 个故障任务".format(
+        len(tasks)))
+    print("   故障模型: {}".format(FAULT_LABELS.get(mutate_mode, mutate_mode)))
+    print("   时间语义: {}".format(
+        FAULT_TIMING_LABELS.get(timing_key, timing_key)))
+    print("   任务目录: {}".format(tasks_dir))
+    if timing_key == "transient" and is_seq:
+        enable_note = "第 {} 拍为 1（单拍脉冲），其余为 0".format(inject_cycle)
+    elif is_seq:
+        enable_note = "前 {} 拍为 0，第 {} 拍起为 1（持续有效）".format(
+            inject_cycle, inject_cycle)
+    else:
+        enable_note = "组合逻辑，时间 0 起为 1"
+    print("   故障使能: {}".format(enable_note))
+    print("   BMC 深度: {} 拍（其中 {} 拍为注错后观察窗口）".format(
+        sby_depth, depth))
+    init_note = "setundef -init -zero"
+    if use_constraints:
+        init_note += " + reset 序列（存在 rst/reset 时）"
+    print("   初态对齐: {}".format(init_note))
     return tasks
