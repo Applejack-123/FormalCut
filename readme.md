@@ -6,7 +6,7 @@
 
 针对宇航级芯片故障注入验证中“故障数量多、仿真开销大”的痛点，本工具借助开源形式化工具链（Yosys + SymbiYosys + SMT 求解器），实现了对数字电路**内部寄存器级**故障的自动化注入与静态筛减。工具能够在给定的输入约束和观察点下，剔除“已证明无观察影响”的无效故障，从而大幅降低后续故障仿真的时间开销。
 
-当前版本已经完全走通 **Yosys 原生工具链**：故障注入使用 Yosys 内置 `mutate`，双副本比较和相等断言使用 Yosys 内置 `miter -equiv -make_assert`，证明使用 SBY + Yices，不再依赖 `fault_rtlil` 等外部插件。Python 只负责生成任务脚本、输入假设和“延迟注错”harness，不手写比较逻辑或断言。故障支持 **单 bit 永久翻转** 和 **单 bit 瞬时翻转** 两种时间语义，详细改造说明见 [docs/fault_timing_changes.md](docs/fault_timing_changes.md)。
+当前版本已经完全走通 **Yosys 原生工具链**：故障注入使用 Yosys 内置 `mutate`，双副本比较和相等断言使用 Yosys 内置 `miter -equiv -make_assert`，证明使用 SBY + Yices，不再依赖 `fault_rtlil` 等外部插件。Python 只负责生成任务脚本、输入假设和“延迟注错”，不手写比较逻辑或断言。故障支持 **单 bit 永久翻转** 和 **单 bit 瞬时翻转** 两种时间语义，详细改造说明见 [docs/fault_timing_changes.md](docs/fault_timing_changes.md)。
 
 ## 🏗️ 技术架构与原理
 
